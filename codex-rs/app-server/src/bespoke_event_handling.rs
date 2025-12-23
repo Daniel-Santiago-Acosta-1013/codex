@@ -3,6 +3,7 @@ use crate::codex_message_processor::PendingInterrupts;
 use crate::codex_message_processor::PendingRollbacks;
 use crate::codex_message_processor::TurnSummary;
 use crate::codex_message_processor::TurnSummaryStore;
+use crate::error_code::INVALID_REQUEST_ERROR_CODE;
 use crate::outgoing_message::OutgoingMessageSender;
 use codex_app_server_protocol::AccountRateLimitsUpdatedNotification;
 use codex_app_server_protocol::AgentMessageDeltaNotification;
@@ -28,6 +29,7 @@ use codex_app_server_protocol::FileUpdateChange;
 use codex_app_server_protocol::InterruptConversationResponse;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
+use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::McpToolCallError;
 use codex_app_server_protocol::McpToolCallResult;
 use codex_app_server_protocol::McpToolCallStatus;
@@ -55,6 +57,7 @@ use codex_app_server_protocol::TurnStatus;
 use codex_core::CodexConversation;
 use codex_core::parse_command::shlex_join;
 use codex_core::protocol::ApplyPatchApprovalRequestEvent;
+use codex_core::protocol::CodexErrorInfo as CoreCodexErrorInfo;
 use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::ExecApprovalRequestEvent;
@@ -340,6 +343,26 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::Error(ev) => {
+            let message = ev.message.clone();
+            let codex_error_info = ev.codex_error_info.clone();
+
+            // If this error belongs to an in-flight `thread/rollback` request, fail that request
+            // (and clear pending state) so subsequent rollbacks are unblocked.
+            //
+            // Don't send a notification for this error.
+            if matches!(
+                codex_error_info,
+                Some(CoreCodexErrorInfo::ThreadRollbackFailed)
+            ) {
+                return handle_thread_rollback_failed(
+                    conversation_id,
+                    message,
+                    &pending_rollbacks,
+                    &outgoing,
+                )
+                .await;
+            };
+
             let turn_error = TurnError {
                 message: ev.message,
                 codex_error_info: ev.codex_error_info.map(V2CodexErrorInfo::from),
@@ -348,7 +371,7 @@ pub(crate) async fn apply_bespoke_event_handling(
             handle_error(conversation_id, turn_error.clone(), &turn_summary_store).await;
             outgoing
                 .send_server_notification(ServerNotification::Error(ErrorNotification {
-                    error: turn_error,
+                    error: turn_error.clone(),
                     will_retry: false,
                     thread_id: conversation_id.to_string(),
                     turn_id: event_turn_id.clone(),
@@ -699,13 +722,10 @@ pub(crate) async fn apply_bespoke_event_handling(
                 map.remove(&conversation_id)
             };
 
-            if let Some((rid, ver)) = pending {
-                match ver {
-                    ApiVersion::V2 => outgoing.send_response(rid, ThreadRollbackResponse {}).await,
-                    ApiVersion::V1 => {
-                        // No v1 API for rollback; ignore.
-                    }
-                }
+            if let Some(request_id) = pending {
+                outgoing
+                    .send_response(request_id, ThreadRollbackResponse {})
+                    .await;
             }
         }
         EventMsg::TurnDiff(turn_diff_event) => {
@@ -922,6 +942,31 @@ async fn handle_turn_interrupted(
         outgoing,
     )
     .await;
+}
+
+async fn handle_thread_rollback_failed(
+    conversation_id: ConversationId,
+    message: String,
+    pending_rollbacks: &PendingRollbacks,
+    outgoing: &OutgoingMessageSender,
+) {
+    let pending_rollback = {
+        let mut map = pending_rollbacks.lock().await;
+        map.remove(&conversation_id)
+    };
+
+    if let Some(request_id) = pending_rollback {
+        outgoing
+            .send_error(
+                request_id,
+                JSONRPCErrorError {
+                    code: INVALID_REQUEST_ERROR_CODE,
+                    message: message.clone(),
+                    data: None,
+                },
+            )
+            .await;
+    }
 }
 
 async fn handle_token_count_event(

@@ -704,6 +704,7 @@ pub enum CodexErrorInfo {
     ResponseTooManyFailedAttempts {
         http_status_code: Option<u16>,
     },
+    ThreadRollbackFailed,
     Other,
 }
 

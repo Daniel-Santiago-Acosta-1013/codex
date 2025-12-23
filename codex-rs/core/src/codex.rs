@@ -2076,7 +2076,7 @@ mod handlers {
                 id: sub_id,
                 msg: EventMsg::Error(ErrorEvent {
                     message: "num_turns must be >= 1".to_string(),
-                    codex_error_info: Some(CodexErrorInfo::BadRequest),
+                    codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
                 }),
             })
             .await;
@@ -2089,7 +2089,7 @@ mod handlers {
                 id: sub_id,
                 msg: EventMsg::Error(ErrorEvent {
                     message: "Cannot rollback while a turn is in progress.".to_string(),
-                    codex_error_info: Some(CodexErrorInfo::BadRequest),
+                    codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
                 }),
             })
             .await;

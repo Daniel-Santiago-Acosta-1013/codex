@@ -497,4 +497,28 @@ mod tests {
         ];
         assert_eq!(turns, expected);
     }
+
+    #[test]
+    fn thread_rollback_clears_all_turns_when_num_turns_exceeds_history() {
+        let events = vec![
+            EventMsg::UserMessage(UserMessageEvent {
+                message: "One".into(),
+                images: None,
+            }),
+            EventMsg::AgentMessage(AgentMessageEvent {
+                message: "A1".into(),
+            }),
+            EventMsg::UserMessage(UserMessageEvent {
+                message: "Two".into(),
+                images: None,
+            }),
+            EventMsg::AgentMessage(AgentMessageEvent {
+                message: "A2".into(),
+            }),
+            EventMsg::ThreadRollback(ThreadRollbackEvent { num_turns: 99 }),
+        ];
+
+        let turns = build_turns_from_event_msgs(&events);
+        assert_eq!(turns, Vec::<Turn>::new());
+    }
 }

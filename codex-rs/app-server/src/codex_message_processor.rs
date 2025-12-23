@@ -178,7 +178,8 @@ use uuid::Uuid;
 
 type PendingInterruptQueue = Vec<(RequestId, ApiVersion)>;
 pub(crate) type PendingInterrupts = Arc<Mutex<HashMap<ConversationId, PendingInterruptQueue>>>;
-pub(crate) type PendingRollbacks = Arc<Mutex<HashMap<ConversationId, (RequestId, ApiVersion)>>>;
+
+pub(crate) type PendingRollbacks = Arc<Mutex<HashMap<ConversationId, RequestId>>>;
 
 /// Per-conversation accumulation of the latest states e.g. error message while a turn runs.
 #[derive(Default, Clone)]
@@ -1546,11 +1547,12 @@ impl CodexMessageProcessor {
                 return;
             }
 
-            map.insert(conversation_id, (request_id.clone(), ApiVersion::V2));
+            map.insert(conversation_id, request_id.clone());
         }
 
         if let Err(err) = conversation.submit(Op::ThreadRollback { num_turns }).await {
-            // No ThreadRollback event will arrive; clean up and reply immediately.
+            // No ThreadRollback event will arrive if an error occurs.
+            // Clean up and reply immediately.
             let mut map = self.pending_rollbacks.lock().await;
             map.remove(&conversation_id);
 
