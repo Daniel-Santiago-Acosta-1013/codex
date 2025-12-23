@@ -104,7 +104,23 @@ async fn thread_rollback_drops_last_turns_and_persists_to_rollout() -> Result<()
         mcp.read_stream_until_response_message(RequestId::Integer(rollback_id)),
     )
     .await??;
-    let ThreadRollbackResponse {} = to_response::<ThreadRollbackResponse>(rollback_resp)?;
+    let ThreadRollbackResponse {
+        thread: rolled_back_thread,
+    } = to_response::<ThreadRollbackResponse>(rollback_resp)?;
+
+    assert_eq!(rolled_back_thread.turns.len(), 1);
+    assert_eq!(rolled_back_thread.turns[0].items.len(), 2);
+    match &rolled_back_thread.turns[0].items[0] {
+        ThreadItem::UserMessage { content, .. } => {
+            assert_eq!(
+                content,
+                &vec![V2UserInput::Text {
+                    text: first_text.to_string()
+                }]
+            );
+        }
+        other => panic!("expected user message item, got {other:?}"),
+    }
 
     // Resume and confirm the history is pruned.
     let resume_id = mcp

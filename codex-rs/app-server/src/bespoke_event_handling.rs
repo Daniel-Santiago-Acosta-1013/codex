@@ -3,6 +3,10 @@ use crate::codex_message_processor::PendingInterrupts;
 use crate::codex_message_processor::PendingRollbacks;
 use crate::codex_message_processor::TurnSummary;
 use crate::codex_message_processor::TurnSummaryStore;
+use crate::codex_message_processor::read_event_msgs_from_rollout;
+use crate::codex_message_processor::read_summary_from_rollout;
+use crate::codex_message_processor::summary_to_thread;
+use crate::error_code::INTERNAL_ERROR_CODE;
 use crate::error_code::INVALID_REQUEST_ERROR_CODE;
 use crate::outgoing_message::OutgoingMessageSender;
 use codex_app_server_protocol::AccountRateLimitsUpdatedNotification;
@@ -54,6 +58,7 @@ use codex_app_server_protocol::TurnInterruptResponse;
 use codex_app_server_protocol::TurnPlanStep;
 use codex_app_server_protocol::TurnPlanUpdatedNotification;
 use codex_app_server_protocol::TurnStatus;
+use codex_app_server_protocol::build_turns_from_event_msgs;
 use codex_core::CodexConversation;
 use codex_core::parse_command::shlex_join;
 use codex_core::protocol::ApplyPatchApprovalRequestEvent;
@@ -93,6 +98,7 @@ pub(crate) async fn apply_bespoke_event_handling(
     pending_rollbacks: PendingRollbacks,
     turn_summary_store: TurnSummaryStore,
     api_version: ApiVersion,
+    fallback_model_provider: String,
 ) {
     let Event {
         id: event_turn_id,
@@ -724,9 +730,49 @@ pub(crate) async fn apply_bespoke_event_handling(
             };
 
             if let Some(request_id) = pending {
-                outgoing
-                    .send_response(request_id, ThreadRollbackResponse {})
-                    .await;
+                let rollout_path = conversation.rollout_path();
+                let response = match read_summary_from_rollout(
+                    rollout_path.as_path(),
+                    fallback_model_provider.as_str(),
+                )
+                .await
+                {
+                    Ok(summary) => {
+                        let mut thread = summary_to_thread(summary);
+                        match read_event_msgs_from_rollout(rollout_path.as_path()).await {
+                            Ok(events) => {
+                                thread.turns = build_turns_from_event_msgs(&events);
+                                ThreadRollbackResponse { thread }
+                            }
+                            Err(err) => {
+                                let error = JSONRPCErrorError {
+                                    code: INTERNAL_ERROR_CODE,
+                                    message: format!(
+                                        "failed to load rollout `{}`: {err}",
+                                        rollout_path.display()
+                                    ),
+                                    data: None,
+                                };
+                                outgoing.send_error(request_id, error).await;
+                                return;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let error = JSONRPCErrorError {
+                            code: INTERNAL_ERROR_CODE,
+                            message: format!(
+                                "failed to load rollout `{}`: {err}",
+                                rollout_path.display()
+                            ),
+                            data: None,
+                        };
+                        outgoing.send_error(request_id, error).await;
+                        return;
+                    }
+                };
+
+                outgoing.send_response(request_id, response).await;
             }
         }
         EventMsg::TurnDiff(turn_diff_event) => {

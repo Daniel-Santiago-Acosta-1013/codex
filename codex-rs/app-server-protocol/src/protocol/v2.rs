@@ -1052,6 +1052,10 @@ pub struct ThreadArchiveResponse {}
 #[ts(export_to = "v2/")]
 pub struct ThreadRollbackParams {
     pub thread_id: String,
+    /// The number of turns to drop from the end of the thread. Must be >= 1.
+    ///
+    /// This only modifies the thread's history and does not revert local file changes
+    /// that have been made by the agent. Clients are responsible for reverting these changes.
     pub num_turns: u32,
 }
 
@@ -1059,9 +1063,12 @@ pub struct ThreadRollbackParams {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadRollbackResponse {
-    // TODO(owen): should this return the Thread object with the Turns populated?
-    // That way it'd be helpful for the client to confirm what the Thread looks
-    // like after the rollback.
+    /// The updated thread after applying the rollback, with `turns` populated.
+    ///
+    /// The ThreadItems stored in each Turn are lossy since we explicitly do not
+    /// persist all agent interactions, such as command executions. This is the same
+    /// behavior as `thread/resume`.
+    pub thread: Thread,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -1202,7 +1209,7 @@ pub struct Thread {
     pub source: SessionSource,
     /// Optional Git metadata captured when the thread was created.
     pub git_info: Option<GitInfo>,
-    /// Only populated on a `thread/resume` response.
+    /// Only populated on `thread/resume` and `thread/rollback` responses.
     /// For all other responses and notifications returning a Thread,
     /// the turns field will be an empty list.
     pub turns: Vec<Turn>,

@@ -3152,6 +3152,7 @@ impl CodexMessageProcessor {
         let pending_rollbacks = self.pending_rollbacks.clone();
         let turn_summary_store = self.turn_summary_store.clone();
         let api_version_for_task = api_version;
+        let fallback_model_provider = self.config.model_provider_id.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -3210,6 +3211,7 @@ impl CodexMessageProcessor {
                             pending_rollbacks.clone(),
                             turn_summary_store.clone(),
                             api_version_for_task,
+                            fallback_model_provider.clone(),
                         )
                         .await;
                     }
@@ -3410,7 +3412,7 @@ async fn derive_config_from_params(
     Config::load_with_cli_overrides_and_harness_overrides(cli_overrides, overrides).await
 }
 
-async fn read_summary_from_rollout(
+pub(crate) async fn read_summary_from_rollout(
     path: &Path,
     fallback_provider: &str,
 ) -> std::io::Result<ConversationSummary> {
@@ -3467,6 +3469,24 @@ async fn read_summary_from_rollout(
         source: session_meta.source,
         git_info,
     })
+}
+
+pub(crate) async fn read_event_msgs_from_rollout(
+    path: &Path,
+) -> std::io::Result<Vec<codex_protocol::protocol::EventMsg>> {
+    let items = match RolloutRecorder::get_rollout_history(path).await? {
+        InitialHistory::New => Vec::new(),
+        InitialHistory::Forked(items) => items,
+        InitialHistory::Resumed(resumed) => resumed.history,
+    };
+
+    Ok(items
+        .into_iter()
+        .filter_map(|item| match item {
+            RolloutItem::EventMsg(event) => Some(event),
+            _ => None,
+        })
+        .collect())
 }
 
 fn extract_conversation_summary(
@@ -3530,7 +3550,7 @@ fn parse_datetime(timestamp: Option<&str>) -> Option<DateTime<Utc>> {
     })
 }
 
-fn summary_to_thread(summary: ConversationSummary) -> Thread {
+pub(crate) fn summary_to_thread(summary: ConversationSummary) -> Thread {
     let ConversationSummary {
         conversation_id,
         path,

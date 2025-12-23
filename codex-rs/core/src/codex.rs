@@ -1002,6 +1002,19 @@ impl Session {
         }
     }
 
+    /// Persist the event to rollout and ensure it is flushed before delivering it to clients.
+    ///
+    /// Use sparingly: this adds I/O latency to event delivery, but is helpful when the client
+    /// immediately re-reads the rollout file in response to this event.
+    pub(crate) async fn send_event_raw_flushed(&self, event: Event) {
+        let rollout_items = vec![RolloutItem::EventMsg(event.msg.clone())];
+        self.persist_rollout_items(&rollout_items).await;
+        self.flush_rollout().await;
+        if let Err(e) = self.tx_event.send(event).await {
+            error!("failed to send tool call event: {e}");
+        }
+    }
+
     pub(crate) async fn emit_turn_item_started(&self, turn_context: &TurnContext, item: &TurnItem) {
         self.send_event(
             turn_context,
@@ -2103,13 +2116,13 @@ mod handlers {
         sess.replace_history(pruned).await;
         sess.recompute_token_usage(turn_context.as_ref()).await;
 
-        sess.send_event(
-            turn_context.as_ref(),
-            EventMsg::ThreadRolledBack(ThreadRolledBackEvent { num_turns }),
-        )
+        // Ensure the rollback marker is visible in the rollout file before the event is
+        // delivered to clients (some clients immediately re-read the rollout on receipt).
+        sess.send_event_raw_flushed(Event {
+            id: turn_context.sub_id.clone(),
+            msg: EventMsg::ThreadRolledBack(ThreadRolledBackEvent { num_turns }),
+        })
         .await;
-        // Ensure the rollback event message is visible immediately.
-        sess.flush_rollout().await;
     }
 
     pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
