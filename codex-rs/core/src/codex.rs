@@ -3021,6 +3021,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn thread_rollback_drops_last_turn_from_history() {
+        let (sess, tc, rx) = make_session_and_context_with_rx().await;
+
+        let initial_context = sess.build_initial_context(tc.as_ref());
+        sess.record_into_history(&initial_context, tc.as_ref())
+            .await;
+
+        let turn_1 = vec![
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "turn 1 user".to_string(),
+                }],
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: "turn 1 assistant".to_string(),
+                }],
+            },
+        ];
+        sess.record_into_history(&turn_1, tc.as_ref()).await;
+
+        let turn_2 = vec![
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "turn 2 user".to_string(),
+                }],
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: "turn 2 assistant".to_string(),
+                }],
+            },
+        ];
+        sess.record_into_history(&turn_2, tc.as_ref()).await;
+
+        handlers::thread_rollback(&sess, "sub-1".to_string(), 1).await;
+
+        let rollback_event = wait_for_thread_rolled_back(&rx).await;
+        assert_eq!(rollback_event.num_turns, 1);
+
+        let mut expected = Vec::new();
+        expected.extend(initial_context);
+        expected.extend(turn_1);
+
+        let actual = sess.clone_history().await.get_history();
+        assert_eq!(expected, actual);
+    }
+
+    #[tokio::test]
+    async fn thread_rollback_clears_history_when_num_turns_exceeds_existing_turns() {
+        let (sess, tc, rx) = make_session_and_context_with_rx().await;
+
+        let initial_context = sess.build_initial_context(tc.as_ref());
+        sess.record_into_history(&initial_context, tc.as_ref())
+            .await;
+
+        let turn_1 = vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "turn 1 user".to_string(),
+            }],
+        }];
+        sess.record_into_history(&turn_1, tc.as_ref()).await;
+
+        handlers::thread_rollback(&sess, "sub-1".to_string(), 99).await;
+
+        let rollback_event = wait_for_thread_rolled_back(&rx).await;
+        assert_eq!(rollback_event.num_turns, 99);
+
+        let actual = sess.clone_history().await.get_history();
+        assert_eq!(initial_context, actual);
+    }
+
+    #[tokio::test]
+    async fn thread_rollback_fails_when_turn_in_progress() {
+        let (sess, tc, rx) = make_session_and_context_with_rx().await;
+
+        let initial_context = sess.build_initial_context(tc.as_ref());
+        sess.record_into_history(&initial_context, tc.as_ref())
+            .await;
+
+        *sess.active_turn.lock().await = Some(crate::state::ActiveTurn::default());
+        handlers::thread_rollback(&sess, "sub-1".to_string(), 1).await;
+
+        let error_event = wait_for_thread_rollback_failed(&rx).await;
+        assert_eq!(
+            error_event.codex_error_info,
+            Some(CodexErrorInfo::ThreadRollbackFailed)
+        );
+
+        let actual = sess.clone_history().await.get_history();
+        assert_eq!(initial_context, actual);
+    }
+
+    #[tokio::test]
+    async fn thread_rollback_fails_when_num_turns_is_zero() {
+        let (sess, tc, rx) = make_session_and_context_with_rx().await;
+
+        let initial_context = sess.build_initial_context(tc.as_ref());
+        sess.record_into_history(&initial_context, tc.as_ref())
+            .await;
+
+        handlers::thread_rollback(&sess, "sub-1".to_string(), 0).await;
+
+        let error_event = wait_for_thread_rollback_failed(&rx).await;
+        assert_eq!(error_event.message, "num_turns must be >= 1");
+        assert_eq!(
+            error_event.codex_error_info,
+            Some(CodexErrorInfo::ThreadRollbackFailed)
+        );
+
+        let actual = sess.clone_history().await.get_history();
+        assert_eq!(initial_context, actual);
+    }
+
+    #[tokio::test]
     async fn set_rate_limits_retains_previous_credits() {
         let codex_home = tempfile::tempdir().expect("create temp dir");
         let config = build_test_config(codex_home.path()).await;
@@ -3251,6 +3376,44 @@ mod tests {
         };
 
         assert_eq!(expected, got);
+    }
+
+    async fn wait_for_thread_rolled_back(
+        rx: &async_channel::Receiver<Event>,
+    ) -> crate::protocol::ThreadRolledBackEvent {
+        let deadline = StdDuration::from_secs(2);
+        let start = std::time::Instant::now();
+        loop {
+            let remaining = deadline.saturating_sub(start.elapsed());
+            let evt = tokio::time::timeout(remaining, rx.recv())
+                .await
+                .expect("timeout waiting for event")
+                .expect("event");
+            match evt.msg {
+                EventMsg::ThreadRolledBack(payload) => return payload,
+                _ => continue,
+            }
+        }
+    }
+
+    async fn wait_for_thread_rollback_failed(rx: &async_channel::Receiver<Event>) -> ErrorEvent {
+        let deadline = StdDuration::from_secs(2);
+        let start = std::time::Instant::now();
+        loop {
+            let remaining = deadline.saturating_sub(start.elapsed());
+            let evt = tokio::time::timeout(remaining, rx.recv())
+                .await
+                .expect("timeout waiting for event")
+                .expect("event");
+            match evt.msg {
+                EventMsg::Error(payload)
+                    if payload.codex_error_info == Some(CodexErrorInfo::ThreadRollbackFailed) =>
+                {
+                    return payload;
+                }
+                _ => continue,
+            }
+        }
     }
 
     fn text_block(s: &str) -> ContentBlock {
