@@ -1,41 +1,42 @@
-use crate::util::resolve_path;
 use codex_apply_patch::ApplyPatchAction;
 use codex_apply_patch::ApplyPatchFileChange;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::HashSet;
-use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
 #[derive(Debug, Default)]
 pub(crate) struct PatchApprovalStore {
-    approved_paths: HashSet<PathBuf>,
+    approved_paths: HashSet<AbsolutePathBuf>,
 }
 
 impl PatchApprovalStore {
     pub fn approve_action(&mut self, action: &ApplyPatchAction, cwd: &Path) {
         for (path, change) in action.changes() {
-            self.approved_paths.insert(resolve_and_normalize(cwd, path));
+            if let Some(abs) = resolve_abs(cwd, path) {
+                self.approved_paths.insert(abs);
+            }
             if let ApplyPatchFileChange::Update { move_path, .. } = change
                 && let Some(dest) = move_path
+                && let Some(abs) = resolve_abs(cwd, dest)
             {
-                self.approved_paths.insert(resolve_and_normalize(cwd, dest));
+                self.approved_paths.insert(abs);
             }
         }
     }
 
     pub fn is_action_approved(&self, action: &ApplyPatchAction, cwd: &Path) -> bool {
         for (path, change) in action.changes() {
-            if !self
-                .approved_paths
-                .contains(&resolve_and_normalize(cwd, path))
-            {
+            let Some(abs) = resolve_abs(cwd, path) else {
+                return false;
+            };
+            if !self.approved_paths.contains(&abs) {
                 return false;
             }
             if let ApplyPatchFileChange::Update { move_path, .. } = change
                 && let Some(dest) = move_path
-                && !self
-                    .approved_paths
-                    .contains(&resolve_and_normalize(cwd, dest))
+                && let Some(abs) = resolve_abs(cwd, dest)
+                && !self.approved_paths.contains(&abs)
             {
                 return false;
             }
@@ -44,23 +45,8 @@ impl PatchApprovalStore {
     }
 }
 
-fn resolve_and_normalize(cwd: &Path, path: &PathBuf) -> PathBuf {
-    let abs = resolve_path(cwd, path);
-    normalize_path_components(&abs)
-}
-
-fn normalize_path_components(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for comp in path.components() {
-        match comp {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
+fn resolve_abs(cwd: &Path, path: &PathBuf) -> Option<AbsolutePathBuf> {
+    AbsolutePathBuf::resolve_path_against_base(path, cwd).ok()
 }
 
 #[cfg(test)]
