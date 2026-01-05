@@ -10,22 +10,35 @@
 use crate::event_mapping;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RolloutItem;
 
 /// Return the indices of user message boundaries in a rollout stream.
 ///
 /// A user message boundary is a `RolloutItem::ResponseItem(ResponseItem::Message { .. })`
 /// whose parsed turn item is `TurnItem::UserMessage`.
+///
+/// Rollout streams can contain `ThreadRolledBack` markers. Those markers indicate that the
+/// last N user turns were removed from the effective thread history; we apply them here so
+/// indexing uses the post-rollback history rather than the raw stream.
 pub(crate) fn user_message_positions_in_rollout(items: &[RolloutItem]) -> Vec<usize> {
     let mut user_positions = Vec::new();
     for (idx, item) in items.iter().enumerate() {
-        if let RolloutItem::ResponseItem(item @ ResponseItem::Message { .. }) = item
-            && matches!(
-                event_mapping::parse_turn_item(item),
-                Some(TurnItem::UserMessage(_))
-            )
-        {
-            user_positions.push(idx);
+        match item {
+            RolloutItem::ResponseItem(item @ ResponseItem::Message { .. })
+                if matches!(
+                    event_mapping::parse_turn_item(item),
+                    Some(TurnItem::UserMessage(_))
+                ) =>
+            {
+                user_positions.push(idx);
+            }
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
+                let num_turns = usize::try_from(rollback.num_turns).unwrap_or(usize::MAX);
+                let new_len = user_positions.len().saturating_sub(num_turns);
+                user_positions.truncate(new_len);
+            }
+            _ => {}
         }
     }
     user_positions
@@ -109,6 +122,7 @@ mod tests {
     use assert_matches::assert_matches;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::ReasoningItemReasoningSummary;
+    use codex_protocol::protocol::ThreadRolledBackEvent;
     use pretty_assertions::assert_eq;
 
     fn user_msg(text: &str) -> ResponseItem {
@@ -175,6 +189,32 @@ mod tests {
 
         let truncated2 = truncate_rollout_before_nth_user_message_from_start(&rollout, 2);
         assert_matches!(truncated2.as_slice(), []);
+    }
+
+    #[test]
+    fn truncates_rollout_from_start_applies_thread_rollback_markers() {
+        let rollout_items = vec![
+            RolloutItem::ResponseItem(user_msg("u1")),
+            RolloutItem::ResponseItem(assistant_msg("a1")),
+            RolloutItem::ResponseItem(user_msg("u2")),
+            RolloutItem::ResponseItem(assistant_msg("a2")),
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                num_turns: 1,
+            })),
+            RolloutItem::ResponseItem(user_msg("u3")),
+            RolloutItem::ResponseItem(assistant_msg("a3")),
+            RolloutItem::ResponseItem(user_msg("u4")),
+            RolloutItem::ResponseItem(assistant_msg("a4")),
+        ];
+
+        // Effective user history after applying rollback(1) is: u1, u3, u4.
+        // So n_from_start=2 should cut before u4 (not u3).
+        let truncated = truncate_rollout_before_nth_user_message_from_start(&rollout_items, 2);
+        let expected = rollout_items[..7].to_vec();
+        assert_eq!(
+            serde_json::to_value(&truncated).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
     }
 
     #[tokio::test]
